@@ -112,6 +112,18 @@ def dialogs(query, limit, as_json):
                             "type": str(chat.type).split(".")[-1],
                             "name": name,
                             "username": getattr(chat, "username", None),
+                            "unread": d.unread_messages_count,
+                            "unread_mentions": d.unread_mentions_count,
+                            "unread_mark": d.unread_mark,
+                            "pinned": d.is_pinned,
+                            "last_date": (
+                                d.top_message.date.isoformat()
+                                if d.top_message and d.top_message.date
+                                else None
+                            ),
+                            "last_outgoing": (
+                                bool(d.top_message.outgoing) if d.top_message else None
+                            ),
                         },
                         ensure_ascii=False,
                     )
@@ -196,6 +208,7 @@ def history(chat, limit, query, as_json):
                             "id": m.id,
                             "date": _timestamp(m.date),
                             "from_me": bool(m.from_user and m.from_user.is_self),
+                            "from": fmt_peer(m.from_user or m.chat),
                             "text": text,
                         },
                         ensure_ascii=False,
