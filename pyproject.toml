@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tgcli"
+version = "0.1.0"
+description = "CLI for your Telegram account via Pyrogram (MTProto): search dialogs, read history, send messages and files, export chats."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "pyrogram>=2.0.100",
+    "click>=8.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+tgcli = "tgcli.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tgcli*"]

@@ -1,0 +1,28 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Secrets — never commit your session or credentials
+*.session
+*.session-journal
+*.session.session
+.env
+.env.*
+!*.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Output
+*.log
+/tmp/
