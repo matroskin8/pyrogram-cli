@@ -11,6 +11,7 @@ import sys
 from datetime import datetime
 
 import click
+from pyrogram import raw, utils
 from pyrogram.errors import FloodWait, SessionPasswordNeeded
 
 from .client import build_client, fmt_peer
@@ -99,6 +100,22 @@ def dialogs(query, limit, as_json):
     async def _dialogs():
         app = build_client()
         await app.start()
+        # get_dialogs() spans every folder, so fetch the archive once and tag it:
+        # callers need to tell an archived chat from an active one.
+        archived_ids = set()
+        off_date, off_id, off_peer = 0, 0, raw.types.InputPeerEmpty()
+        while True:  # GetDialogs caps a response at 100, so page through
+            page = await app.invoke(raw.functions.messages.GetDialogs(
+                offset_date=off_date, offset_id=off_id, offset_peer=off_peer,
+                limit=100, hash=0, folder_id=1))
+            if not page.dialogs:
+                break
+            archived_ids |= {utils.get_peer_id(x.peer) for x in page.dialogs}
+            if len(page.dialogs) < 100 or not page.messages:
+                break
+            last = page.messages[-1]
+            off_date, off_id = last.date, last.id
+            off_peer = await app.resolve_peer(utils.get_peer_id(last.peer_id))
         async for d in app.get_dialogs(limit=limit):
             chat = d.chat
             name = fmt_peer(chat)
@@ -112,6 +129,7 @@ def dialogs(query, limit, as_json):
                             "type": str(chat.type).split(".")[-1],
                             "name": name,
                             "username": getattr(chat, "username", None),
+                            "archived": chat.id in archived_ids,
                             "unread": d.unread_messages_count,
                             "unread_mentions": d.unread_mentions_count,
                             "unread_mark": d.unread_mark,
@@ -209,6 +227,13 @@ def history(chat, limit, query, as_json):
                             "date": _timestamp(m.date),
                             "from_me": bool(m.from_user and m.from_user.is_self),
                             "from": fmt_peer(m.from_user or m.chat),
+                            # A forward carries the forwarder as from_user, so the
+                            # original author must be reported separately.
+                            "fwd_from": (
+                                fmt_peer(m.forward_from or m.forward_from_chat)
+                                if (m.forward_from or m.forward_from_chat)
+                                else m.forward_sender_name
+                            ),
                             "text": text,
                         },
                         ensure_ascii=False,
