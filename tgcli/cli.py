@@ -91,6 +91,46 @@ def me():
     _run(_me())
 
 
+def _input_peer_id(peer):
+    """InputPeer* -> the signed id that `dialogs` prints."""
+    if isinstance(peer, raw.types.InputPeerUser):
+        return peer.user_id
+    if isinstance(peer, raw.types.InputPeerChat):
+        return -peer.chat_id
+    if isinstance(peer, raw.types.InputPeerChannel):
+        return -1000000000000 - peer.channel_id
+    return None
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON lines.")
+def folders(as_json):
+    """List chat folders and the peers each one includes."""
+    async def _folders():
+        app = build_client()
+        await app.start()
+        res = await app.invoke(raw.functions.messages.GetDialogFilters())
+        for f in getattr(res, "filters", res):
+            title = getattr(f, "title", None)
+            if title is None:  # DialogFilterDefault has no title
+                continue
+            name = title.text if hasattr(title, "text") else str(title)
+            peers = [
+                _input_peer_id(p)
+                for p in list(getattr(f, "pinned_peers", []))
+                + list(getattr(f, "include_peers", []))
+            ]
+            peers = [p for p in peers if p is not None]
+            if as_json:
+                click.echo(json.dumps({"name": name, "peers": peers},
+                                      ensure_ascii=False))
+            else:
+                click.echo(f"{name:<20} {len(peers)} peers")
+        await app.stop()
+
+    _run(_folders())
+
+
 @main.command()
 @click.option("--query", "-q", help="Filter dialogs by name/username (case-insensitive).")
 @click.option("--limit", "-n", default=50, show_default=True, help="Max dialogs.")
