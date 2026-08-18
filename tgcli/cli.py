@@ -102,14 +102,26 @@ def _input_peer_id(peer):
     return None
 
 
+# Auto-rules a folder can carry on top of its explicit peer list.
+AUTO_FLAGS = ("contacts", "non_contacts", "groups", "broadcasts", "bots",
+              "exclude_muted", "exclude_read", "exclude_archived")
+
+
 @main.command()
+@click.option("--peers", "-p", "with_peers", is_flag=True,
+              help="List each folder's peers with names.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON lines.")
-def folders(as_json):
-    """List chat folders and the peers each one includes."""
+def folders(with_peers, as_json):
+    """List chat folders: auto-rules, peer counts and (with -p) the peers."""
     async def _folders():
         app = build_client()
         await app.start()
         res = await app.invoke(raw.functions.messages.GetDialogFilters())
+        names = {}
+        if with_peers:
+            # One dialogs pass, not get_chat() per peer: that hits FLOOD_WAIT fast.
+            async for d in app.get_dialogs():
+                names[d.chat.id] = fmt_peer(d.chat)
         for f in getattr(res, "filters", res):
             title = getattr(f, "title", None)
             if title is None:  # DialogFilterDefault has no title
@@ -121,11 +133,22 @@ def folders(as_json):
                 + list(getattr(f, "include_peers", []))
             ]
             peers = [p for p in peers if p is not None]
+            flags = [n for n in AUTO_FLAGS if getattr(f, n, False)]
+            excluded = len(getattr(f, "exclude_peers", []) or [])
             if as_json:
-                click.echo(json.dumps({"name": name, "peers": peers},
-                                      ensure_ascii=False))
+                payload = {"name": name, "peers": peers, "flags": flags,
+                           "excluded": excluded}
+                if with_peers:
+                    payload["names"] = {str(p): names[p]
+                                        for p in peers if p in names}
+                click.echo(json.dumps(payload, ensure_ascii=False))
             else:
-                click.echo(f"{name:<20} {len(peers)} peers")
+                extra = f" [{','.join(flags)}]" if flags else ""
+                if excluded:
+                    extra += f" -{excluded} excluded"
+                click.echo(f"{name:<20} {len(peers)} peers{extra}")
+                for p in peers if with_peers else []:
+                    click.echo(f"  {p:<15} {names.get(p, '(not in dialogs)')}")
         await app.stop()
 
     _run(_folders())
