@@ -397,6 +397,12 @@ def export(chat, out, limit):
                     "from_me": bool(m.from_user and m.from_user.is_self),
                     "text": m.text or m.caption or None,
                     "media": m.media.value if m.media else None,
+                    "links": [e.url for e in (m.entities or m.caption_entities or []) if e.url],
+                    "buttons": [
+                        {"text": b.text, "url": b.url}
+                        for row in getattr(m.reply_markup, "inline_keyboard", [])
+                        for b in row if b.url
+                    ],
                 }
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 written += 1
