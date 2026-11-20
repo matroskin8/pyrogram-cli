@@ -16,8 +16,13 @@ dependencies = [
     "tgcrypto>=1.2.5",
 ]
 
+[project.optional-dependencies]
+api = ["fastapi>=0.110", "uvicorn>=0.27"]
+test = ["pytest>=7", "httpx>=0.27"]
+
 [project.scripts]
 tgcli = "tgcli.cli:main"
+tgcli-api = "tgcli.api:main"
 
 [tool.setuptools.packages.find]
 include = ["tgcli*"]
