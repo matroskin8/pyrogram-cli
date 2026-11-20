@@ -1,5 +1,6 @@
 import asyncio
 import io
+import os
 import tempfile
 from pathlib import Path
 import time
@@ -22,7 +23,7 @@ def app_with(*responses, connected=False):
     return SimpleNamespace(api_id=123, api_hash='hash', storage=storage,
                            connect=AsyncMock(return_value=connected), disconnect=AsyncMock(),
                            invoke=AsyncMock(side_effect=list(responses)), check_password=AsyncMock(),
-                           session=SimpleNamespace(stop=AsyncMock()))
+                           session=None, dispatcher=SimpleNamespace(updates_queue=asyncio.Queue()))
 
 
 def success():
@@ -45,18 +46,82 @@ class QRTests(unittest.TestCase):
         self.assertIsInstance(query, raw.functions.auth.ExportLoginToken)
         self.assertEqual((query.api_id, query.api_hash, query.except_ids), (123, 'hash', []))
 
-    def test_refresh_and_poll(self):
+    def test_update_triggers_export_without_polling(self):
         token = raw.types.auth.LoginToken(expires=int(time.time()) + 20, token=b'a')
-        token2 = raw.types.auth.LoginToken(expires=0, token=b'b')
-        app = app_with(token, token, token2, success())
-        with patch('tgcli.qr._display') as display, patch('tgcli.qr.asyncio.sleep', new_callable=AsyncMock) as sleep:
+        app = app_with(token, success())
+        async def exercise():
+            with patch('tgcli.qr._display'):
+                task = asyncio.create_task(login_qr(app))
+                await asyncio.sleep(0.05)
+                self.assertEqual(app.invoke.await_count, 1)
+                app.dispatcher.updates_queue.put_nowait((raw.types.UpdateLoginToken(), {}, {}))
+                await task
+        with patch('sys.stdin.isatty', return_value=True), patch('sys.stdout.isatty', return_value=True):
+            asyncio.run(exercise())
+        self.assertEqual(app.invoke.await_count, 2)
+
+    def test_pyrogram_update_short_reaches_queue(self):
+        from pyrogram import Client
+        async def exercise():
+            client = Client('test', api_id=123, api_hash='hash', in_memory=True)
+            update = raw.types.UpdateLoginToken()
+            await client.handle_updates(raw.types.UpdateShort(update=update, date=0))
+            self.assertIs((await client.dispatcher.updates_queue.get())[0], update)
+        asyncio.run(exercise())
+
+    def test_session_packet_routes_to_real_client_queue(self):
+        from pyrogram import Client
+        from pyrogram.session import Session
+        async def exercise():
+            client = Client('test', api_id=123, api_hash='hash', in_memory=True)
+            session = Session(client, 2, b'x' * 256, False)
+            update = raw.types.UpdateLoginToken()
+            body = raw.types.UpdateShort(update=update, date=0)
+            from pyrogram.session.internals import MsgId
+            msg = SimpleNamespace(body=body, seq_no=0, msg_id=MsgId())
+            with patch('pyrogram.session.session.mtproto.unpack', return_value=msg):
+                await session.handle_packet(b'packet')
+                await asyncio.sleep(0)
+            self.assertIs((await asyncio.wait_for(client.dispatcher.updates_queue.get(), 1))[0], update)
+        asyncio.run(exercise())
+
+    def test_expiry_refresh_and_overall_timeout(self):
+        token = raw.types.auth.LoginToken(expires=int(time.time()) + 1, token=b'a')
+        app = app_with(token, success())
+        with patch('tgcli.qr._display'):
             self.run_login(app)
-        self.assertEqual([x.args[0] for x in display.call_args_list], [b'a', b'b'])
-        self.assertEqual(sleep.await_count, 3)
-        self.assertEqual(sleep.await_args_list[-1].args[0], 1)
+        self.assertEqual(app.invoke.await_count, 2)
+        app = app_with(raw.types.auth.LoginToken(expires=int(time.time()) + 60, token=b'b'))
+        with patch('tgcli.qr._display'), patch('tgcli.qr.LOGIN_TIMEOUT', 0.05):
+            with self.assertRaisesRegex(click.ClickException, 'timed out'):
+                self.run_login(app)
+        app.disconnect.assert_awaited_once()
+
+    def test_umask_restored_and_connect_failure_cleanup(self):
+        app = app_with()
+        app.storage.conn = object()
+        app.storage.close = AsyncMock()
+        app.session = SimpleNamespace(connection=object(), stop=AsyncMock())
+        async def fail():
+            mask = os.umask(0o077)
+            os.umask(mask)
+            self.assertEqual(mask & 0o077, 0o077)
+            raise RuntimeError('connect failed')
+        app.connect.side_effect = fail
+        original = os.umask(0o022)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'connect failed'):
+                self.run_login(app)
+            current = os.umask(0o022)
+            self.assertEqual(current, 0o022)
+        finally:
+            os.umask(original)
+        app.session.stop.assert_awaited_once()
+        app.storage.close.assert_awaited_once()
 
     def test_migration_uses_new_dc_then_import(self):
         app = app_with(raw.types.auth.LoginTokenMigrateTo(dc_id=4, token=b'migrate'), success())
+        app.session = SimpleNamespace(stop=AsyncMock())
         session = SimpleNamespace(start=AsyncMock())
         auth = SimpleNamespace(create=AsyncMock(return_value=b'newkey'))
         with patch('tgcli.qr.Auth', return_value=auth) as auth_type, patch('tgcli.qr.Session', return_value=session) as session_type:
