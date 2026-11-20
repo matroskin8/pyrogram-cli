@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import click
 from click.testing import CliRunner
 from pyrogram import raw
-from pyrogram.errors import SessionPasswordNeeded
+from pyrogram.errors import PasswordHashInvalid, SessionPasswordNeeded
 
 from tgcli.cli import main
 from tgcli.qr import login_qr, _migrate, _display
@@ -143,6 +143,25 @@ class QRTests(unittest.TestCase):
         self.assertTrue(prompt.call_args.kwargs['hide_input'])
         app.check_password.assert_awaited_once_with('secret')
         app.storage.save.assert_awaited_once()
+        app.disconnect.assert_awaited_once()
+
+    def test_wrong_password_then_success(self):
+        app = app_with(SessionPasswordNeeded())
+        app.check_password.side_effect = [PasswordHashInvalid(), None]
+        with patch('tgcli.qr.click.prompt', side_effect=['wrong', 'correct']):
+            self.run_login(app)
+        self.assertEqual(app.check_password.await_count, 2)
+        app.storage.save.assert_awaited_once()
+        app.disconnect.assert_awaited_once()
+
+    def test_three_wrong_passwords_stop_cleanly(self):
+        app = app_with(SessionPasswordNeeded())
+        app.check_password.side_effect = PasswordHashInvalid()
+        with patch('tgcli.qr.click.prompt', return_value='wrong'):
+            with self.assertRaisesRegex(click.ClickException, 'maximum attempts'):
+                self.run_login(app)
+        self.assertEqual(app.check_password.await_count, 3)
+        app.storage.save.assert_not_awaited()
         app.disconnect.assert_awaited_once()
 
     def test_failures_disconnect_and_do_not_save(self):

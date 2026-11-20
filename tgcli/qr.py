@@ -10,7 +10,7 @@ import time
 import click
 import qrcode
 from pyrogram import raw
-from pyrogram.errors import SessionPasswordNeeded
+from pyrogram.errors import PasswordHashInvalid, SessionPasswordNeeded
 from pyrogram.session import Auth, Session
 
 LOGIN_TIMEOUT = 300
@@ -96,8 +96,14 @@ async def _authorize(app, deadline):
             else:
                 await _wait_for_login_update(app, result.expires)
         except SessionPasswordNeeded:
-            await app.check_password(_password(deadline))
-            return
+            for attempt in range(3):
+                try:
+                    await app.check_password(_password(deadline))
+                    return
+                except PasswordHashInvalid:
+                    if attempt == 2:
+                        raise click.ClickException("Incorrect 2FA password; maximum attempts reached") from None
+                    click.echo("Incorrect 2FA password. Try again.", err=True)
 
 
 async def login_qr(app):
