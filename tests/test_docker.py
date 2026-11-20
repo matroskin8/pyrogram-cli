@@ -1,5 +1,8 @@
 import asyncio
 import os
+import subprocess
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -36,6 +39,18 @@ class DockerBehaviorTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Error: no credentials", result.output)
         self.assertNotIn("Traceback", result.output)
+
+    def test_entrypoint_sets_umask_and_forwards_arguments(self):
+        entrypoint = Path(__file__).resolve().parents[1] / "docker-entrypoint.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "tgcli"
+            stub.write_text('#!/bin/sh\numask\nprintf "%s\\n" "$@"\ntouch "$OUTPUT"\n')
+            stub.chmod(0o700)
+            output = Path(tmp) / "session"
+            env = {**os.environ, "PATH": tmp + os.pathsep + os.environ["PATH"], "OUTPUT": str(output)}
+            result = subprocess.run(["/bin/sh", str(entrypoint), "login", "a b"], env=env, text=True, capture_output=True, check=True)
+            self.assertEqual(result.stdout.splitlines(), ["0077", "login", "a b"])
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
 
     def test_help_without_credentials(self):
         result = CliRunner().invoke(main, ["--help"])

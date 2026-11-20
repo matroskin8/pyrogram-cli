@@ -54,20 +54,22 @@ def login():
     async def _login():
         app = build_client(interactive_login=True)
         await app.connect()
-        sent = await app.send_code(phone)
-        click.echo(
-            f"Code sent (type={sent.type}, timeout={sent.timeout}s). "
-            "Check your Telegram app."
-        )
-        code = click.prompt("Enter the code", type=str)
         try:
-            await app.sign_in(phone, sent.phone_code_hash, code)
-        except SessionPasswordNeeded:
-            password = click.prompt("2FA password required", hide_input=True, type=str)
-            await app.check_password(password)
-        me = await app.get_me()
-        click.echo(f"Logged in as {fmt_peer(me)} (id={me.id})")
-        await app.disconnect()
+            sent = await app.send_code(phone)
+            click.echo(
+                f"Code sent (type={sent.type}, timeout={sent.timeout}s). "
+                "Check your Telegram app."
+            )
+            code = click.prompt("Enter the code", hide_input=True, type=str)
+            try:
+                await app.sign_in(phone, sent.phone_code_hash, code)
+            except SessionPasswordNeeded:
+                password = click.prompt("2FA password required", hide_input=True, type=str)
+                await app.check_password(password)
+            me = await app.get_me()
+            click.echo(f"Logged in as {fmt_peer(me)} (id={me.id})")
+        finally:
+            await app.disconnect()
 
     _run(_login())
 

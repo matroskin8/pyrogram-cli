@@ -7,11 +7,12 @@ RUN groupadd --gid 10001 tgcli && useradd --uid 10001 --gid 10001 --create-home 
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY tgcli ./tgcli
+COPY docker-entrypoint.sh /usr/local/bin/tgcli-entrypoint
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && pip install --no-cache-dir . \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
 USER 10001:10001
 WORKDIR /work
-ENTRYPOINT ["tgcli"]
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/tgcli-entrypoint"]
 CMD ["--help"]
