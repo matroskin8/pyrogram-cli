@@ -14,7 +14,7 @@ import click
 from pyrogram import raw, utils
 from pyrogram.errors import FloodWait, SessionPasswordNeeded
 
-from .client import build_client, fmt_peer
+from .client import ConfigError, build_client, fmt_peer
 
 
 def _run(coro):
@@ -23,6 +23,8 @@ def _run(coro):
     except FloodWait as e:
         click.secho(f"FLOOD_WAIT: try again in {e.value}s", fg="yellow", err=True)
         sys.exit(2)
+    except ConfigError as e:
+        raise click.ClickException(str(e)) from e
     except KeyboardInterrupt:
         click.secho("aborted", fg="yellow", err=True)
         sys.exit(130)
@@ -47,30 +49,38 @@ def main():
 @main.command()
 def login():
     """Create a new session interactively (code goes to your Telegram/SMS)."""
-    from pyrogram import Client
-
-    from .client import load_config
-
-    cfg = load_config()
     phone = click.prompt("Phone number (international format)")
 
     async def _login():
-        app = Client(cfg["session"], api_id=cfg["api_id"], api_hash=cfg["api_hash"])
+        app = build_client(interactive_login=True)
         await app.connect()
-        sent = await app.send_code(phone)
-        click.echo(
-            f"Code sent (type={sent.type}, timeout={sent.timeout}s). "
-            "Check your Telegram app."
-        )
-        code = click.prompt("Enter the code", type=str)
         try:
-            await app.sign_in(phone, sent.phone_code_hash, code)
-        except SessionPasswordNeeded:
-            password = click.prompt("2FA password required", hide_input=True, type=str)
-            await app.check_password(password)
-        me = await app.get_me()
-        click.echo(f"Logged in as {fmt_peer(me)} (id={me.id})")
-        await app.stop()
+            sent = await app.send_code(phone)
+            click.echo(
+                f"Code sent (type={sent.type}, timeout={sent.timeout}s). "
+                "Check your Telegram app."
+            )
+            code = click.prompt("Enter the code", hide_input=True, type=str)
+            try:
+                await app.sign_in(phone, sent.phone_code_hash, code)
+            except SessionPasswordNeeded:
+                password = click.prompt("2FA password required", hide_input=True, type=str)
+                await app.check_password(password)
+            me = await app.get_me()
+            click.echo(f"Logged in as {fmt_peer(me)} (id={me.id})")
+        finally:
+            await app.disconnect()
+
+    _run(_login())
+
+
+@main.command(name="login-qr")
+def login_qr_command():
+    """Create a session by scanning a QR code in Telegram."""
+    from .qr import login_qr
+
+    async def _login():
+        await login_qr(build_client(interactive_login=True))
 
     _run(_login())
 
