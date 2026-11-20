@@ -1,13 +1,16 @@
 """Authenticated HTTP interface to an already-authorized Telegram session."""
 import hmac
 import os
+import re
 from contextlib import asynccontextmanager
 
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.enums import ParseMode
+from pyrogram.errors import BadRequest, FloodWait, Forbidden, RPCError
+from pyrogram import raw
 
 from .client import build_client, fmt_peer
 from .cli import _resolve_chat
@@ -21,6 +24,14 @@ def create_app(client_factory=build_client, token=None):
             raise RuntimeError("TGCLI_API_TOKEN must be at least 32 bytes")
         app.state.token = secret.encode("utf-8")
         client = client_factory()
+        client.sleep_threshold = 0
+        # Several Pyrogram iterators override the client threshold with 60 seconds.
+        invoke = client.invoke
+
+        async def invoke_without_flood_sleep(query, retries=10, timeout=15, sleep_threshold=None):
+            return await invoke(query, retries=retries, timeout=timeout, sleep_threshold=0)
+
+        client.invoke = invoke_without_flood_sleep
         connected = False
         initialized = False
         try:
@@ -28,6 +39,8 @@ def create_app(client_factory=build_client, token=None):
             connected = True
             if not authorized:
                 raise RuntimeError("Telegram session is not authorized; run tgcli login first")
+            await client.invoke(raw.functions.updates.GetState())
+            client.me = await client.get_me()
             await client.initialize()
             initialized = True
             app.state.telegram = client
@@ -56,7 +69,8 @@ def create_app(client_factory=build_client, token=None):
 
     @app.exception_handler(RPCError)
     async def telegram_error(request, exc):
-        return JSONResponse({"detail": "Telegram request failed"}, status_code=502)
+        status = 400 if isinstance(exc, BadRequest) else 403 if isinstance(exc, Forbidden) else 502
+        return JSONResponse({"detail": "Telegram request failed"}, status_code=status)
 
     async def resolve(client, chat):
         try:
@@ -103,8 +117,15 @@ def create_app(client_factory=build_client, token=None):
 
     @app.post("/v1/chats/{chat}/messages", status_code=201)
     async def send(chat: str, body: SendMessage, client=Depends(authenticate)):
-        chat_id = await resolve(client, chat)
-        return message(await client.send_message(chat_id, body.text))
+        if re.fullmatch(r"-?[0-9]{1,20}", chat):
+            chat_id = int(chat)
+            if not -(2**63) <= chat_id < 2**63 or chat_id == 0:
+                raise HTTPException(422, "Invalid numeric chat ID")
+        elif re.fullmatch(r"@[A-Za-z][A-Za-z0-9_]{3,31}", chat):
+            chat_id = chat
+        else:
+            raise HTTPException(422, "Use a numeric chat ID or @username")
+        return message(await client.send_message(chat_id, body.text, parse_mode=ParseMode.DISABLED))
 
     return app
 
