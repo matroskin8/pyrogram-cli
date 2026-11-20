@@ -74,6 +74,17 @@ def login():
     _run(_login())
 
 
+@main.command(name="login-qr")
+def login_qr_command():
+    """Create a session by scanning a QR code in Telegram."""
+    from .qr import login_qr
+
+    async def _login():
+        await login_qr(build_client(interactive_login=True))
+
+    _run(_login())
+
+
 @main.command()
 def me():
     """Show who the session belongs to."""
