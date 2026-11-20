@@ -11,6 +11,11 @@ class ConfigError(RuntimeError):
     pass
 
 
+class NonInteractiveClient(Client):
+    async def authorize(self):
+        raise ConfigError("Session is not authorized; run 'tgcli login' interactively first")
+
+
 def _load_env() -> None:
     """Load .env from cwd, then from home dir (later wins only if not set)."""
     load_dotenv(Path.cwd() / ".env")
@@ -38,13 +43,15 @@ def load_config() -> dict:
     return {"api_id": api_id, "api_hash": api_hash, "session": str(session)}
 
 
-def build_client() -> Client:
+def build_client(*, interactive_login: bool = False) -> Client:
     cfg = load_config()
-    return Client(
+    noninteractive = os.getenv("TGCLI_NONINTERACTIVE", "").lower() in ("1", "true", "yes")
+    client_type = NonInteractiveClient if noninteractive and not interactive_login else Client
+    return client_type(
         cfg["session"],
         api_id=cfg["api_id"],
         api_hash=cfg["api_hash"],
-        workdir=str(Path.cwd()),
+        workdir=os.getenv("TGCLI_WORKDIR") or str(Path.cwd()),
         in_memory=False,
     )
 

@@ -11,9 +11,10 @@ import sys
 from datetime import datetime
 
 import click
+from pyrogram import raw, utils
 from pyrogram.errors import FloodWait, SessionPasswordNeeded
 
-from .client import build_client, fmt_peer
+from .client import ConfigError, build_client, fmt_peer
 
 
 def _run(coro):
@@ -22,6 +23,8 @@ def _run(coro):
     except FloodWait as e:
         click.secho(f"FLOOD_WAIT: try again in {e.value}s", fg="yellow", err=True)
         sys.exit(2)
+    except ConfigError as e:
+        raise click.ClickException(str(e)) from e
     except KeyboardInterrupt:
         click.secho("aborted", fg="yellow", err=True)
         sys.exit(130)
@@ -46,30 +49,38 @@ def main():
 @main.command()
 def login():
     """Create a new session interactively (code goes to your Telegram/SMS)."""
-    from pyrogram import Client
-
-    from .client import load_config
-
-    cfg = load_config()
     phone = click.prompt("Phone number (international format)")
 
     async def _login():
-        app = Client(cfg["session"], api_id=cfg["api_id"], api_hash=cfg["api_hash"])
+        app = build_client(interactive_login=True)
         await app.connect()
-        sent = await app.send_code(phone)
-        click.echo(
-            f"Code sent (type={sent.type}, timeout={sent.timeout}s). "
-            "Check your Telegram app."
-        )
-        code = click.prompt("Enter the code", type=str)
         try:
-            await app.sign_in(phone, sent.phone_code_hash, code)
-        except SessionPasswordNeeded:
-            password = click.prompt("2FA password required", hide_input=True, type=str)
-            await app.check_password(password)
-        me = await app.get_me()
-        click.echo(f"Logged in as {fmt_peer(me)} (id={me.id})")
-        await app.stop()
+            sent = await app.send_code(phone)
+            click.echo(
+                f"Code sent (type={sent.type}, timeout={sent.timeout}s). "
+                "Check your Telegram app."
+            )
+            code = click.prompt("Enter the code", hide_input=True, type=str)
+            try:
+                await app.sign_in(phone, sent.phone_code_hash, code)
+            except SessionPasswordNeeded:
+                password = click.prompt("2FA password required", hide_input=True, type=str)
+                await app.check_password(password)
+            me = await app.get_me()
+            click.echo(f"Logged in as {fmt_peer(me)} (id={me.id})")
+        finally:
+            await app.disconnect()
+
+    _run(_login())
+
+
+@main.command(name="login-qr")
+def login_qr_command():
+    """Create a session by scanning a QR code in Telegram."""
+    from .qr import login_qr
+
+    async def _login():
+        await login_qr(build_client(interactive_login=True))
 
     _run(_login())
 
@@ -90,6 +101,69 @@ def me():
     _run(_me())
 
 
+def _input_peer_id(peer):
+    """InputPeer* -> the signed id that `dialogs` prints."""
+    if isinstance(peer, raw.types.InputPeerUser):
+        return peer.user_id
+    if isinstance(peer, raw.types.InputPeerChat):
+        return -peer.chat_id
+    if isinstance(peer, raw.types.InputPeerChannel):
+        return -1000000000000 - peer.channel_id
+    return None
+
+
+# Auto-rules a folder can carry on top of its explicit peer list.
+AUTO_FLAGS = ("contacts", "non_contacts", "groups", "broadcasts", "bots",
+              "exclude_muted", "exclude_read", "exclude_archived")
+
+
+@main.command()
+@click.option("--peers", "-p", "with_peers", is_flag=True,
+              help="List each folder's peers with names.")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON lines.")
+def folders(with_peers, as_json):
+    """List chat folders: auto-rules, peer counts and (with -p) the peers."""
+    async def _folders():
+        app = build_client()
+        await app.start()
+        res = await app.invoke(raw.functions.messages.GetDialogFilters())
+        names = {}
+        if with_peers:
+            # One dialogs pass, not get_chat() per peer: that hits FLOOD_WAIT fast.
+            async for d in app.get_dialogs():
+                names[d.chat.id] = fmt_peer(d.chat)
+        for f in getattr(res, "filters", res):
+            title = getattr(f, "title", None)
+            if title is None:  # DialogFilterDefault has no title
+                continue
+            name = title.text if hasattr(title, "text") else str(title)
+            peers = [
+                _input_peer_id(p)
+                for p in list(getattr(f, "pinned_peers", []))
+                + list(getattr(f, "include_peers", []))
+            ]
+            peers = [p for p in peers if p is not None]
+            flags = [n for n in AUTO_FLAGS if getattr(f, n, False)]
+            excluded = len(getattr(f, "exclude_peers", []) or [])
+            if as_json:
+                payload = {"name": name, "peers": peers, "flags": flags,
+                           "excluded": excluded}
+                if with_peers:
+                    payload["names"] = {str(p): names[p]
+                                        for p in peers if p in names}
+                click.echo(json.dumps(payload, ensure_ascii=False))
+            else:
+                extra = f" [{','.join(flags)}]" if flags else ""
+                if excluded:
+                    extra += f" -{excluded} excluded"
+                click.echo(f"{name:<20} {len(peers)} peers{extra}")
+                for p in peers if with_peers else []:
+                    click.echo(f"  {p:<15} {names.get(p, '(not in dialogs)')}")
+        await app.stop()
+
+    _run(_folders())
+
+
 @main.command()
 @click.option("--query", "-q", help="Filter dialogs by name/username (case-insensitive).")
 @click.option("--limit", "-n", default=50, show_default=True, help="Max dialogs.")
@@ -99,6 +173,22 @@ def dialogs(query, limit, as_json):
     async def _dialogs():
         app = build_client()
         await app.start()
+        # get_dialogs() spans every folder, so fetch the archive once and tag it:
+        # callers need to tell an archived chat from an active one.
+        archived_ids = set()
+        off_date, off_id, off_peer = 0, 0, raw.types.InputPeerEmpty()
+        while True:  # GetDialogs caps a response at 100, so page through
+            page = await app.invoke(raw.functions.messages.GetDialogs(
+                offset_date=off_date, offset_id=off_id, offset_peer=off_peer,
+                limit=100, hash=0, folder_id=1))
+            if not page.dialogs:
+                break
+            archived_ids |= {utils.get_peer_id(x.peer) for x in page.dialogs}
+            if len(page.dialogs) < 100 or not page.messages:
+                break
+            last = page.messages[-1]
+            off_date, off_id = last.date, last.id
+            off_peer = await app.resolve_peer(utils.get_peer_id(last.peer_id))
         async for d in app.get_dialogs(limit=limit):
             chat = d.chat
             name = fmt_peer(chat)
@@ -112,6 +202,19 @@ def dialogs(query, limit, as_json):
                             "type": str(chat.type).split(".")[-1],
                             "name": name,
                             "username": getattr(chat, "username", None),
+                            "archived": chat.id in archived_ids,
+                            "unread": d.unread_messages_count,
+                            "unread_mentions": d.unread_mentions_count,
+                            "unread_mark": d.unread_mark,
+                            "pinned": d.is_pinned,
+                            "last_date": (
+                                d.top_message.date.isoformat()
+                                if d.top_message and d.top_message.date
+                                else None
+                            ),
+                            "last_outgoing": (
+                                bool(d.top_message.outgoing) if d.top_message else None
+                            ),
                         },
                         ensure_ascii=False,
                     )
@@ -196,6 +299,14 @@ def history(chat, limit, query, as_json):
                             "id": m.id,
                             "date": _timestamp(m.date),
                             "from_me": bool(m.from_user and m.from_user.is_self),
+                            "from": fmt_peer(m.from_user or m.chat),
+                            # A forward carries the forwarder as from_user, so the
+                            # original author must be reported separately.
+                            "fwd_from": (
+                                fmt_peer(m.forward_from or m.forward_from_chat)
+                                if (m.forward_from or m.forward_from_chat)
+                                else m.forward_sender_name
+                            ),
                             "text": text,
                         },
                         ensure_ascii=False,
@@ -296,6 +407,12 @@ def export(chat, out, limit):
                     "from_me": bool(m.from_user and m.from_user.is_self),
                     "text": m.text or m.caption or None,
                     "media": m.media.value if m.media else None,
+                    "links": [e.url for e in (m.entities or m.caption_entities or []) if e.url],
+                    "buttons": [
+                        {"text": b.text, "url": b.url}
+                        for row in getattr(m.reply_markup, "inline_keyboard", [])
+                        for b in row if b.url
+                    ],
                 }
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 written += 1

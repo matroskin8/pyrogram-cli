@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!docker-entrypoint.sh
+!pyproject.toml
+!README.md
+!tgcli/
+!tgcli/*.py
